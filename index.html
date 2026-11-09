@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>FaberHealth Pulse</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#030b18;color:#eef6ff;font-family:-apple-system,BlinkMacSystemFont,Arial;padding:20px}
+header{text-align:center;padding:20px 0}
+h1{color:#20e5ae;font-size:27px;margin:5px}
+.sub{color:#9aadc5;font-size:13px}
+.card{background:#0b1b30;border:1px solid #244563;border-radius:17px;padding:17px;margin:13px 0}
+.metrics{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.metric{text-align:center}
+.metric small{color:#9aadc5}
+.value{font-size:34px;font-weight:700;margin:9px 0;color:#20e5ae}
+button{width:100%;padding:16px;border:0;border-radius:12px;background:#12d9a1;color:#001c19;font-size:17px;font-weight:700;margin:7px 0}
+button.secondary{background:#20334b;color:white}
+#status{color:#f5c66b;text-align:center;font-size:14px}
+canvas{width:100%;height:190px;background:#020a14;border-radius:10px}
+video{width:100%;max-height:180px;object-fit:cover;border-radius:12px;background:#000}
+.note{font-size:12px;color:#9aadc5;line-height:1.5}
+</style>
+</head>
+<body>
+<header>
+<h1>♡ FABERHEALTH PULSE</h1>
+<div class="sub">Advanced Cardiovascular Research</div>
+<div class="sub">Experimental PPG platform · Version 1.0</div>
+</header>
+
+<div class="card metrics">
+ <div class="metric">
+  <small>Frequenza cardiaca</small>
+  <div class="value" id="bpm">--</div>
+  <small>BPM</small>
+ </div>
+ <div class="metric">
+  <small>Qualità segnale</small>
+  <div class="value" id="quality">--</div>
+  <small id="qualityText">In attesa</small>
+ </div>
+</div>
+
+<div class="card">
+ <h3>Tracciato PPG in tempo reale</h3>
+ <canvas id="graph"></canvas>
+ <p class="note">Il tracciato viene ricavato dai cambiamenti di luminosità rilevati dalla fotocamera.</p>
+</div>
+
+<div class="card">
+ <h3>Acquisizione fotocamera</h3>
+ <video id="video" autoplay muted playsinline></video>
+ <p id="status">Fotocamera non ancora avviata.</p>
+ <button id="start">Avvia acquisizione reale</button>
+ <button id="stop" class="secondary">Termina acquisizione</button>
+</div>
+
+<div class="card">
+ <h3>Intervalli tra i battiti</h3>
+ <div class="value" id="interval">--</div>
+ <small>Intervallo medio in millisecondi</small>
+ <p class="note">I risultati sono sperimentali. Non costituiscono una valutazione medica.</p>
+</div>
+
+<div class="card">
+ <h3>Informazioni sulla misurazione</h3>
+ <p class="note" id="info">Nessuna misurazione effettuata.</p>
+ <p class="note">La fotocamera misura variazioni ottiche del flusso sanguigno periferico. Non è un ECG e non misura direttamente la pressione arteriosa.</p>
+</div>
+
+<script>
+const video=document.getElementById("video");
+const canvas=document.createElement("canvas");
+const ctx=canvas.getContext("2d",{willReadFrequently:true});
+const graph=document.getElementById("graph");
+const g=graph.getContext("2d");
+
+let stream=null,active=false,raf=null;
+let samples=[],peaks=[],lastPeak=0;
+let signal=[],lastValue=0;
+
+function status(t){
+ document.getElementById("status").textContent=t;
+}
+
+function draw(){
+ const w=graph.clientWidth;
+ const h=190;
+ graph.width=w*devicePixelRatio;
+ graph.height=h*devicePixelRatio;
+ g.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+ g.clearRect(0,0,w,h);
+ g.strokeStyle="#18334b";
+ g.lineWidth=1;
+ for(let y=20;y<h;y+=30){
+  g.beginPath();g.moveTo(0,y);g.lineTo(w,y);g.stroke();
+ }
+ if(signal.length<2)return;
+ const data=signal.slice(-Math.floor(w/2));
+ const min=Math.min(...data),max=Math.max(...data);
+ const range=Math.max(max-min,0.0001);
+ g.beginPath();
+ g.strokeStyle="#20e5ae";
+ g.lineWidth=2;
+ data.forEach((v,i)=>{
+  const x=i*w/(data.length-1);
+  const y=h-10-((v-min)/range)*(h-20);
+  if(i===0)g.moveTo(x,y);else g.lineTo(x,y);
+ });
+ g.stroke();
+}
+
+function analyse(){
+ if(!active)return;
+ if(video.readyState>=2){
+  canvas.width=video.videoWidth;
+  canvas.height=video.videoHeight;
+  ctx.drawImage(video,0,0,canvas.width,canvas.height);
+  const x=Math.floor(canvas.width*.4);
+  const y=Math.floor(canvas.height*.4);
+  const frame=ctx.getImageData(x,y,
+   Math.max(1,Math.floor(canvas.width*.2)),
+   Math.max(1,Math.floor(canvas.height*.2)));
+  let total=0;
+  for(let i=0;i<frame.data.length;i+=4){
+   total+=frame.data[i];
+  }
+  const red=total/(frame.data.length/4);
+  const now=performance.now();
+  samples.push({t:now,v:red});
+  if(samples.length>900)samples.shift();
+
+  if(samples.length>5){
+   const recent=samples.slice(-5);
+   const mean=recent.reduce((a,b)=>a+b.v,0)/recent.length;
+   const filtered=red-mean;
+   signal.push(filtered);
+   if(signal.length>500)signal.shift();
+  }
+
+  if(samples.length>30){
+   const recent=samples.slice(-150);
+   const values=recent.map(s=>s.v);
+   const avg=values.reduce((a,b)=>a+b,0)/values.length;
+   const deviation=Math.sqrt(values.reduce((a,b)=>a+(b-avg)**2,0)/values.length);
+   const threshold=deviation*.35;
+   const n=samples.length;
+   const prev=samples[n-2],cur=samples[n-1];
+   const before=samples[n-3];
+
+   if(cur.v>prev.v && prev.v>before.v &&
+      prev.v>avg+threshold && now-lastPeak>350){
+    const peakTime=prev.t;
+    if(lastPeak>0){
+     const gap=peakTime-lastPeak;
+     if(gap>350 && gap<2000){
+      peaks.push(gap);
+      if(peaks.length>20)peaks.shift();
+      const bpm=Math.round(60000/gap);
+      document.getElementById("bpm").textContent=bpm;
+      const avgGap=peaks.reduce((a,b)=>a+b,0)/peaks.length;
+      document.getElementById("interval").textContent=Math.round(avgGap);
+     }
+    }
+    lastPeak=peakTime;
+   }
+
+   const variation=deviation;
+   if(variation>1.5){
+    document.getElementById("quality").textContent="Rilevato";
+    document.getElementById("qualityText").textContent="Segnale presente";
+   }else{
+    document.getElementById("quality").textContent="Debole";
+    document.getElementById("qualityText").textContent="Segnale insufficiente";
+   }
+  }
+  draw();
+ }
+ raf=requestAnimationFrame(analyse);
+}
+
+document.getElementById("start").onclick=async()=>{
+ if(active)return;
+ try{
+  status("Richiesta accesso alla fotocamera...");
+  stream=await navigator.mediaDevices.getUserMedia({
+   audio:false,
+   video:{facingMode:{ideal:"environment"}}
+  });
+  video.srcObject=stream;
+  await video.play();
+  active=true;
+  samples=[];peaks=[];signal=[];lastPeak=0;
+  document.getElementById("bpm").textContent="--";
+  document.getElementById("interval").textContent="--";
+  document.getElementById("quality").textContent="--";
+  document.getElementById("info").textContent=
+   "Acquisizione ottica avviata. In attesa di un segnale analizzabile.";
+  status("Fotocamera attiva. Posiziona delicatamente il dito sulla fotocamera posteriore.");
+  analyse();
+ }catch(e){
+  status("Errore fotocamera: "+e.message);
+ }
+};
+
+document.getElementById("stop").onclick=()=>{
+ active=false;
+ if(raf)cancelAnimationFrame(raf);
+ if(stream)stream.getTracks().forEach(t=>t.stop());
+ video.srcObject=null;
+ stream=null;
+ status("Acquisizione terminata.");
+};
+
+draw();
+</script>
+</body>
+</html>
